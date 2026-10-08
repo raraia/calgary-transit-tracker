@@ -1,0 +1,5 @@
+.env
+/bin/
+*.log
+# Static GTFS schedule data we download at setup; too big for git
+/data/gtfs_static/
