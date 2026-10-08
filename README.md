@@ -1,78 +1,75 @@
 # Calgary Transit on-time tracker
 
-Records where every Calgary bus is using the City's free real-time feeds,
-compares that to the schedule, and shows which routes run late, by hour of day.
+Ingests Calgary Transit's live GTFS-Realtime feeds, compares reported positions
+against the published schedule, and reports on-time performance by route, stop
+and hour of day.
 
-Transit apps tell you where your bus is *right now*. This answers the question a
-commuter actually has: **how late does my route usually run at 8am?**
+Transit apps show where a bus is right now. This answers a different question:
+**how reliably does a given route run at a given time of day?**
 
-## Why this project
-
-It's one build that shows the skills Calgary employers ask students for:
-
-- a **data pipeline** that ingests a live feed (energy/finance employers care)
-- a **backend** with a database and REST API (software roles)
-- **Docker + CI/CD** and a cloud deploy (nearly every posting)
-- a **local story** every Calgary interviewer gets instantly
-
-And the data is free, public, and needs no permission to use.
-
-## How it works
+## Architecture
 
 ```
   Calgary Transit          collector            PostgreSQL           API + dashboard
-  GTFS-Realtime feed  ->   (Go service,     ->  stop_time_updates ->  (on-time % by
-  (trip updates)           polls every 45s)     table grows            route and hour)
+  GTFS-Realtime feed  ->   (Go service,     ->  stop_time_updates ->  on-time % by
+  (trip updates)           polls every 45s)     (raw readings)        route and hour
 ```
 
-1. **Collector** (`cmd/collector`) fetches the trip-updates feed every 45s and
-   stores each "trip X is N seconds late at stop S" reading.
-2. **Postgres** holds the raw readings plus the static schedule.
-3. **API + dashboard** (built in weeks 3-4) aggregate the readings into on-time
-   percentages by route, stop and hour.
+- **collector** (`cmd/collector`) polls the trip-updates feed every 45s and
+  stores each stop-level delay reading.
+- **PostgreSQL** holds the raw readings plus the static schedule.
+- **API + dashboard** aggregate the readings into on-time percentages.
 
-GTFS-Realtime is a Google standard. The feed is binary (Protocol Buffers), not
-JSON — `internal/gtfs` decodes it with the official bindings library.
+GTFS-Realtime is a Protocol Buffers (binary) format. `internal/gtfs` decodes it
+using the official MobilityData bindings.
 
-## Getting started
+## Requirements
 
-You need [Go](https://go.dev/dl/) and [Docker Desktop](https://www.docker.com/products/docker-desktop/).
+- [Go](https://go.dev/dl/) 1.24+
+- [Docker](https://www.docker.com/products/docker-desktop/) (for PostgreSQL)
+
+## Quick start
 
 ```bash
-# 1. Grab the Go dependencies
+# Install dependencies
 go mod tidy
 
-# 2. Week-1 win: see live bus delays right now, no database needed
+# Fetch and print current delay readings (no database required)
 go run ./cmd/poc
 
-# 3. Start the database (runs migrations/001_init.sql automatically on first boot)
+# Start PostgreSQL (runs migrations/001_init.sql on first boot)
 docker compose up -d
 
-# 4. Start collecting. Leave this running; the table fills up over time.
+# Start the collector
 cp .env.example .env
 go run ./cmd/collector
 ```
 
-## The four-week plan
+## Layout
 
-- **Week 1 — collect.** Load the static schedule into Postgres; get the collector
-  running on a small cloud server so data accumulates while you build the rest.
-- **Week 2 — compute delays.** Match readings to scheduled stop times; aggregate
-  minutes-late by route, stop and hour. Most of the tests go here.
-- **Week 3 — API + dashboard.** Pick a route, see on-time % by hour, worst stops,
-  today's alerts, plus a CSV export.
-- **Week 4 — ship.** CI, deploy with HTTPS and a domain, README with an
-  architecture diagram and a 2-minute demo video. Post one finding on LinkedIn.
+| Path | Purpose |
+| --- | --- |
+| `cmd/poc` | One-shot fetch-and-print of live delays |
+| `cmd/collector` | Long-running feed poller that writes to the database |
+| `cmd/api` | REST API serving aggregated on-time data |
+| `internal/gtfs` | GTFS-Realtime feed fetching and decoding |
+| `internal/store` | PostgreSQL access |
+| `migrations` | Database schema |
+| `web` | Dashboard front end |
 
-## Security notes (talking points for later)
+## Configuration
 
-- The API uses rate limiting and validates all query parameters.
-- Secrets live in `.env` (gitignored), never in the repo.
-- CI runs dependency scanning (`govulncheck`) on every push.
+Copy `.env.example` to `.env`. Secrets are read from the environment and are
+never committed.
+
+| Variable | Description |
+| --- | --- |
+| `DATABASE_URL` | PostgreSQL connection string |
+| `GTFS_RT_TRIP_UPDATES` | Trip-updates feed URL |
+| `GTFS_RT_VEHICLE_POSITIONS` | Vehicle-positions feed URL |
 
 ## Data & licence
 
-Vehicle positions, trip updates and the schedule come from the
-[City of Calgary open data portal](https://data.calgary.ca/Transportation-Transit/Calgary-Transit-Realtime-Trip-Updates-GTFS-RT/gs4m-mdc2/data).
+Data from the [City of Calgary open data portal](https://data.calgary.ca/Transportation-Transit/Calgary-Transit-Realtime-Trip-Updates-GTFS-RT/gs4m-mdc2/data).
 
 > Contains information licensed under the Open Government Licence – City of Calgary.
