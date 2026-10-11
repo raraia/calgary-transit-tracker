@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Calgary Transit on-time tracker</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Calgary Transit on-time tracker</h1>
+      <p class="muted" id="window-note">How often buses arrive on time, by route and hour of day.</p>
+    </header>
+
+    <div class="controls">
+      <label>Route
+        <select id="route"><option value="">Loading…</option></select>
+      </label>
+      <label>Period
+        <select id="days">
+          <option value="1">Last 24 hours</option>
+          <option value="7" selected>Last 7 days</option>
+          <option value="30">Last 30 days</option>
+        </select>
+      </label>
+    </div>
+
+    <p id="status" class="muted" role="status"></p>
+
+    <section id="detail" hidden>
+      <div class="tiles">
+        <div class="tile"><span class="tile-label">On time</span><span class="tile-value" id="t-ontime">–</span></div>
+        <div class="tile"><span class="tile-label">Average delay</span><span class="tile-value" id="t-delay">–</span></div>
+        <div class="tile"><span class="tile-label">Stop visits measured</span><span class="tile-value" id="t-visits">–</span></div>
+      </div>
+
+      <h2>On-time share by hour of day</h2>
+      <div class="chart-wrap">
+        <svg id="chart" role="img" aria-labelledby="chart-desc"></svg>
+        <div id="tooltip" class="tooltip" hidden></div>
+      </div>
+      <p id="chart-desc" class="sr-only">Column chart of the share of buses on time for each hour of the day.</p>
+      <details>
+        <summary>Show as table</summary>
+        <table id="hourly-table">
+          <thead><tr><th>Hour</th><th>On time</th><th>Avg delay</th><th>Visits</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <p><a id="csv-link" href="#">Download CSV</a></p>
+      </details>
+
+      <h2>Stops with the longest average delay</h2>
+      <table id="stops-table">
+        <thead><tr><th>Stop</th><th>Avg delay</th><th>On time</th><th>Visits</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <footer class="muted">
+      Contains information licensed under the Open Government Licence – City of Calgary.
+    </footer>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
