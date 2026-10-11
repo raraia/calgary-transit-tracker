@@ -1,8 +1,10 @@
 # Calgary Transit on-time tracker
 
-Ingests Calgary Transit's live GTFS-Realtime feeds, compares reported positions
-against the published schedule, and reports on-time performance by route, stop
-and hour of day.
+[![CI](https://github.com/raraia/calgary-transit-tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/raraia/calgary-transit-tracker/actions/workflows/ci.yml)
+
+Ingests Calgary Transit's live GTFS-Realtime feed, compares arrivals against the
+published schedule, and reports on-time performance by route, stop and hour of
+day through a JSON API and a small dashboard.
 
 Transit apps show where a bus is right now. This answers a different question:
 **how reliably does a given route run at a given time of day?**
@@ -10,18 +12,39 @@ Transit apps show where a bus is right now. This answers a different question:
 ## Architecture
 
 ```
-  Calgary Transit          collector            PostgreSQL           API + dashboard
-  GTFS-Realtime feed  ->   (Go service,     ->  stop_time_updates ->  on-time % by
-  (trip updates)           polls every 45s)     (raw readings)        route and hour
+  GTFS-Realtime feed        collector             PostgreSQL               api
+  (trip updates, every  ->  polls, decodes,  ->  stop_visits         ->  /api/routes ...
+   ~30s, protobuf)          upserts visits        (one row per visit)     + dashboard at /
+                                                        ^
+  GTFS static schedule  ->  loadschedule  ------------->|  routes, stops, trips, stop_times
+  (zip of CSVs)             (bulk COPY)
 ```
 
-- **collector** (`cmd/collector`) polls the trip-updates feed every 45s and
-  stores each stop-level delay reading.
-- **PostgreSQL** holds the raw readings plus the static schedule.
-- **API + dashboard** aggregate the readings into on-time percentages.
+| Component | Purpose |
+| --- | --- |
+| `cmd/collector` | Polls the trip-updates feed and records stop visits |
+| `cmd/loadschedule` | Downloads the static GTFS schedule and bulk-loads it |
+| `cmd/api` | Serves the JSON API and the embedded dashboard |
+| `cmd/poc` | One-shot fetch that prints a sample of the live feed |
 
-GTFS-Realtime is a Protocol Buffers (binary) format. `internal/gtfs` decodes it
-using the official MobilityData bindings.
+### How delay is measured
+
+The trip-updates feed publishes *predicted* arrivals for every stop a bus still
+has ahead of it, and repeats the full list on every poll. Storing each prediction
+would grow by tens of thousands of rows per poll and would measure forecasts
+rather than outcomes.
+
+Instead, the collector keeps **one row per stop visit** (service date, trip, stop
+sequence) and overwrites it each poll. Once the bus passes the stop, the feed
+stops mentioning it and the row's final value is the best available record of
+the actual arrival. Only visits that have stopped updating ("settled") are
+counted.
+
+Lateness is taken from the feed's `delay` field when present; otherwise it is
+computed as predicted arrival minus scheduled arrival, using the GTFS
+"noon minus 12 hours" service-day rule so results stay correct across
+daylight-saving changes. An arrival counts as **on time** if it is no more than
+1 minute early and no more than 5 minutes late.
 
 ## Requirements
 
@@ -31,42 +54,79 @@ using the official MobilityData bindings.
 ## Quick start
 
 ```bash
-# Install dependencies
-go mod tidy
-
-# Fetch and print current delay readings (no database required)
-go run ./cmd/poc
-
-# Start PostgreSQL (runs migrations/001_init.sql on first boot)
-docker compose up -d
-
-# Start the collector
-cp .env.example .env
-go run ./cmd/collector
+cp .env.example .env     # optional: defaults work for local development
+make db                  # start PostgreSQL
+make schedule            # load the static schedule (route/stop names, timetable)
+make collect             # start collecting; leave this running
+make api                 # in another terminal; open http://localhost:8080
 ```
 
-## Layout
+The database schema is created and upgraded automatically on startup. Without
+`make`, run the same commands directly, e.g. `go run ./cmd/collector`.
 
-| Path | Purpose |
+## API
+
+All endpoints are `GET` and return JSON. `days` defaults to 7 (range 1–90).
+
+| Endpoint | Description |
 | --- | --- |
-| `cmd/poc` | One-shot fetch-and-print of live delays |
-| `cmd/collector` | Long-running feed poller that writes to the database |
-| `cmd/api` | REST API serving aggregated on-time data |
-| `internal/gtfs` | GTFS-Realtime feed fetching and decoding |
-| `internal/store` | PostgreSQL access |
-| `migrations` | Database schema |
-| `web` | Dashboard front end |
+| `/healthz` | Service and database health |
+| `/api/routes?days=7` | All routes with on-time share and average delay, least reliable first |
+| `/api/routes/{id}/hourly?days=7` | On-time share by hour of day (local time). Add `format=csv` for CSV |
+| `/api/routes/{id}/stops?days=7&limit=10` | Stops with the highest average delay (limit 1–50) |
+
+Example response from `/api/routes/201/hourly`:
+
+```json
+{
+  "route_id": "201",
+  "days": 7,
+  "window": { "max_early_secs": 60, "max_late_secs": 300 },
+  "hours": [
+    { "hour": 7, "visits": 412, "on_time_ratio": 0.71, "avg_delay_secs": 188.4 }
+  ]
+}
+```
+
+Requests are rate-limited per client IP (HTTP 429 when exceeded), inputs are
+validated, all queries are parameterised, and responses carry a strict
+Content-Security-Policy.
 
 ## Configuration
 
-Copy `.env.example` to `.env`. Secrets are read from the environment and are
-never committed.
+Settings are read from environment variables (`make` loads `.env` automatically).
 
-| Variable | Description |
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DATABASE_URL` | `postgres://ctt:ctt@localhost:5432/ctt` | PostgreSQL connection string |
+| `GTFS_RT_TRIP_UPDATES` | City of Calgary feed | Trip-updates feed URL |
+| `GTFS_STATIC_URL` | City of Calgary feed | Static schedule zip URL |
+| `POLL_INTERVAL` | `30s` | Collector poll interval (minimum `10s`) |
+| `API_ADDR` | `:8080` | API listen address |
+
+## Development
+
+```bash
+make test       # unit tests, no database required
+make test-db    # unit tests plus database tests against a separate ctt_test database
+```
+
+Database tests in `internal/store` run only when `TEST_DATABASE_URL` is set, and
+they reset that database, so never point it at real data. CI runs the full suite
+against PostgreSQL 16, along with `gofmt`, `go vet` and `govulncheck`.
+
+### Layout
+
+| Path | Contents |
 | --- | --- |
-| `DATABASE_URL` | PostgreSQL connection string |
-| `GTFS_RT_TRIP_UPDATES` | Trip-updates feed URL |
-| `GTFS_RT_VEHICLE_POSITIONS` | Vehicle-positions feed URL |
+| `internal/gtfs` | Feed fetching, protobuf decoding, service-date rules |
+| `internal/schedule` | Streaming GTFS schedule parser |
+| `internal/collector` | Poll loop: snapshot to stop visits |
+| `internal/store` | PostgreSQL access, migrations, statistics queries |
+| `internal/ontime` | The on-time window definition |
+| `internal/api` | HTTP handlers and middleware |
+| `migrations` | SQL schema, embedded into the binaries |
+| `web` | Dashboard (HTML/CSS/JS, embedded into the API binary) |
 
 ## Data & licence
 

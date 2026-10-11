@@ -1,6 +1,10 @@
-# Starts PostgreSQL in a container so you don't have to install it on your Mac.
-# Run:  docker compose up -d     (starts the DB in the background)
-#       docker compose down      (stops it; data is kept in the named volume)
+# Runs PostgreSQL in a container so nothing needs installing on your machine.
+#
+#   docker compose up -d     start the database in the background
+#   docker compose down      stop it (data is kept in the named volume)
+#
+# The schema is created by the apps themselves on startup (internal/store/migrate.go),
+# so there's nothing to mount here.
 services:
   db:
     image: postgres:16
@@ -10,10 +14,14 @@ services:
       POSTGRES_PASSWORD: ctt
       POSTGRES_DB: ctt
     ports:
-      - "5432:5432"            # host:container — connect from your Mac at localhost:5432
+      - "5432:5432"            # host:container, so your Mac reaches it at localhost:5432
     volumes:
       - ctt-pgdata:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d  # *.sql here run once on first boot
+    healthcheck:               # lets `docker compose up --wait` wait until it accepts connections
+      test: ["CMD-SHELL", "pg_isready -U ctt -d ctt"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
 
 volumes:
   ctt-pgdata:
