@@ -1,5 +1,6 @@
--- Schema for the transit tracker. This file runs automatically the first time
--- the Postgres container starts (see docker-compose.yml).
+-- Initial schema for the transit tracker. Migrations are applied in filename
+-- order by internal/store/migrate.go when the collector, API or schedule loader
+-- starts. Every statement is idempotent (IF NOT EXISTS) so re-running is safe.
 
 -- ---- Static schedule (loaded once from the GTFS schedule zip) --------------
 
@@ -33,7 +34,7 @@ CREATE TABLE IF NOT EXISTS stop_times (
 -- ---- Live observations (written by the collector every 30-60s) -------------
 
 -- Raw delay readings: at time T, trip X was N seconds late reaching stop S.
--- This is the table that grows; everything in the dashboard is aggregated from it.
+-- Superseded by stop_visits in 002 (see that file for why); no longer written to.
 CREATE TABLE IF NOT EXISTS stop_time_updates (
     id             BIGSERIAL PRIMARY KEY,
     observed_at    TIMESTAMPTZ NOT NULL,   -- when we fetched this reading

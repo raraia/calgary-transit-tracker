@@ -1,69 +1,68 @@
-// Command collector is the long-running service. Every POLL_INTERVAL it fetches
-// the live trip-updates feed and stores each delay reading. Leave it running and
-// the stop_time_updates table fills up with the data the dashboard reports on.
+// Command collector is the long-running service that records bus arrivals.
+//
+// Every POLL_INTERVAL it fetches the live trip-updates feed and updates one row
+// per stop visit in the database (see migrations/002_stop_visits.sql for why).
+// Leave it running; the dashboard reports on whatever it has collected.
 //
 // Run:  go run ./cmd/collector
 package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	// Embeds a copy of the time zone database in the binary. It's only used if
+	// the machine has none of its own (common in slim Docker images), so
+	// time.LoadLocation("America/Edmonton") can't fail in production.
+	_ "time/tzdata"
+
+	"github.com/raraia/calgary-transit-tracker/internal/collector"
 	"github.com/raraia/calgary-transit-tracker/internal/gtfs"
 	"github.com/raraia/calgary-transit-tracker/internal/store"
 )
 
-const pollInterval = 45 * time.Second
-
 func main() {
-	dbURL := env("DATABASE_URL", "postgres://ctt:ctt@localhost:5432/ctt")
-	feedURL := env("GTFS_RT_TRIP_UPDATES",
-		"https://data.calgary.ca/download/gs4m-mdc2/application%2Foctet-stream")
+	log := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
-	// ctx is cancelled when you press Ctrl+C, so the loop can stop cleanly.
+	dbURL := env("DATABASE_URL", "postgres://ctt:ctt@localhost:5432/ctt")
+	feedURL := env("GTFS_RT_TRIP_UPDATES", "https://data.calgary.ca/download/gs4m-mdc2/application%2Foctet-stream")
+	interval, err := time.ParseDuration(env("POLL_INTERVAL", "30s"))
+	if err != nil || interval < 10*time.Second {
+		log.Error("POLL_INTERVAL must be a duration of at least 10s, e.g. 30s or 1m")
+		os.Exit(1)
+	}
+
+	// ctx is cancelled on Ctrl+C or a stop signal, so everything shuts down cleanly.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	st, err := store.New(ctx, dbURL)
 	if err != nil {
-		log.Fatalf("connecting to db: %v", err)
+		log.Error("connecting to database", "err", err)
+		os.Exit(1)
 	}
 	defer st.Close()
-
-	log.Printf("collector started, polling every %s", pollInterval)
-	ticker := time.NewTicker(pollInterval)
-	defer ticker.Stop()
-
-	pollOnce(ctx, st, feedURL) // fetch immediately, don't wait a full interval
-	for {
-		select {
-		case <-ctx.Done():
-			log.Println("shutting down")
-			return
-		case <-ticker.C:
-			pollOnce(ctx, st, feedURL)
-		}
+	if err := st.Migrate(ctx); err != nil {
+		log.Error("migrating database", "err", err)
+		os.Exit(1)
 	}
-}
 
-// pollOnce does one fetch-and-store cycle. Errors are logged, not fatal: one bad
-// fetch (network blip, feed hiccup) shouldn't kill a service meant to run for days.
-func pollOnce(ctx context.Context, st *store.Store, feedURL string) {
-	now := time.Now()
-	delays, err := gtfs.FetchTripUpdates(ctx, feedURL)
+	loc, err := time.LoadLocation("America/Edmonton")
 	if err != nil {
-		log.Printf("fetch error: %v", err)
-		return
+		log.Error("loading time zone", "err", err)
+		os.Exit(1)
 	}
-	if err := st.InsertDelays(ctx, delays, now); err != nil {
-		log.Printf("insert error: %v", err)
-		return
-	}
-	log.Printf("stored %d readings", len(delays))
+
+	fetch := func(ctx context.Context) ([]byte, error) { return gtfs.Fetch(ctx, feedURL) }
+	c := collector.New(fetch, st, loc, log)
+
+	log.Info("collector started", "interval", interval)
+	c.Run(ctx, interval)
+	log.Info("collector stopped")
 }
 
 func env(key, fallback string) string {
